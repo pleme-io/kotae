@@ -1,0 +1,21 @@
+[package]
+name = "kotae"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+description = "Kotae (答え) — the typed answer a machine gives a machine. One closed sum over the four distinguishable outcomes of a tool call (found / empty / refused / blind), rendered so that no two of them can ever produce the same bytes. Built because a reader with no peripheral vision cannot tell an empty result from a failed look unless the bytes say so."
+homepage = "https://github.com/pleme-io/kotae"
+repository = "https://github.com/pleme-io/kotae"
+readme = "README.md"
+license = "MIT"
+categories = ["encoding", "development-tools"]
+keywords = ["mcp", "agent", "json", "tool", "protocol"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
