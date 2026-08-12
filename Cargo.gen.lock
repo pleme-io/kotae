@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "cargo_lock_sha256": "18eb73c3de3050ec26edce9159d0ad504d5176214b5a8cd2c7541d0cb969ec9c",
+  "cargo_lock_sha256": "665eb208047ef8c300da0e456f268a13e18557931485134010f673fb9d1bac3f",
   "manifest_sha256": {
-    "Cargo.toml": "57412a27652049f07bca166b5e8f6e43f9f8054a74e663d5ad4668cbbde0a2af"
+    "Cargo.toml": "37c2ab0e8ddf7e8a23f31f4ab877b2878d64954bf6c9bc5e3c087dbc04064d54"
   },
   "target_resolves": {
     "base": {
@@ -11,7 +11,7 @@
         "build_dependencies": [],
         "features": []
       },
-      "kotae-0.1.0": {
+      "kotae-0.1.1": {
         "runtime_dependencies": [
           {
             "name": "serde",
@@ -299,7 +299,7 @@
     "itoa-1.0.18": {
       "edition": "2021"
     },
-    "kotae-0.1.0": {
+    "kotae-0.1.1": {
       "edition": "2024",
       "lib_target": {
         "name": "kotae",
