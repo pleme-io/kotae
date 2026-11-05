@@ -86,21 +86,105 @@
 //! tool and the answer shapes it can return, which would let a server's
 //! contract be checked rather than described. That is a named follow-up, not a
 //! shipped form: `pending-kotae: defkotae-catalog`.
+//!
+//! # The typed form, and the wire form
+//!
+//! [`Outcome<P>`] is the four arms generic over the found payload, so a
+//! library returns its own shape and a caller branches on a type rather than
+//! on a string. [`Answer`] is `Outcome<Value>`: the same sum, with the payload
+//! already serialized, and the one every renderer reads. Any `Outcome<P>` with
+//! a serializable payload renders through the same code, so the typed and the
+//! wire form cannot disagree about a discriminant.
+//!
+//! ```
+//! use kotae::{Answer, Outcome, OutcomeKind};
+//!
+//! let typed: Outcome<Vec<u32>> = Outcome::Found(vec![1, 2]);
+//! assert_eq!(typed.kind(), OutcomeKind::Found);
+//! let wire: Answer = typed.into_answer();
+//! assert_eq!(wire.outcome(), "found");
+//! ```
+//!
+//! [`OutcomeKind::ALL`] enumerates the arms. It and the enum are generated
+//! from one table, so a fifth arm cannot exist without being listed.
+//!
+//! # A named authority for a mutation
+//!
+//! [`Authority`] is a trimmed, non-empty name of who authorized a write. The
+//! only way to hold one is [`Authority::parse`], whose refusal is an
+//! [`Answer`] naming what would be accepted, so a blank authority is refused at
+//! the boundary and never reaches the act it would have authorized.
 
 #![forbid(unsafe_code)]
+
+mod authority;
+
+pub use authority::Authority;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-/// What a tool concluded — the four distinguishable outcomes.
+macro_rules! outcome_kinds {
+    ($($(#[$doc:meta])* $variant:ident => $wire:literal, about_the_world: $world:literal;)+) => {
+        /// Which of the four arms an [`Outcome`] is, with no payload.
+        ///
+        /// Generated with [`OutcomeKind::ALL`] from one table, so the list of
+        /// arms and the enum cannot drift apart.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum OutcomeKind {
+            $($(#[$doc])* $variant,)+
+        }
+
+        impl OutcomeKind {
+            /// Every arm, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// The stable wire discriminant a reader keys on.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+
+            /// Whether an answer of this arm says anything about the subject.
+            #[must_use]
+            pub const fn is_about_the_world(self) -> bool {
+                match self {
+                    $(Self::$variant => $world,)+
+                }
+            }
+        }
+    };
+}
+
+outcome_kinds! {
+    /// Answered, and there is something.
+    Found => "found", about_the_world: true;
+    /// Answered, and there is nothing: a finding.
+    Empty => "empty", about_the_world: true;
+    /// The question was not understood.
+    Refused => "refused", about_the_world: false;
+    /// The question could not be put at all.
+    Blind => "blind", about_the_world: false;
+}
+
+impl std::fmt::Display for OutcomeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What a tool concluded — the four distinguishable outcomes, generic over the
+/// found payload.
 ///
 /// A closed sum, and the closure is the primitive: a fifth kind of answer has
 /// no value, so a server cannot invent one that a reader has no rule for.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Answer {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome<P> {
     /// The question was answered and there is something. The payload is the
     /// tool's own shape — kotae holds no opinion about it.
-    Found(Value),
+    Found(P),
 
     /// The question was answered and there is **nothing**.
     ///
@@ -136,30 +220,10 @@ pub enum Answer {
     },
 }
 
-impl Answer {
-    /// Something was found. The payload is serialized as-is.
-    ///
-    /// # Errors
-    ///
-    /// Never — a payload that cannot be serialized becomes a [`Self::Blind`]
-    /// naming the serialization failure, because a tool that found something
-    /// and cannot say so has not answered.
-    #[must_use]
-    pub fn found<T: Serialize>(payload: &T) -> Self {
-        match serde_json::to_value(payload) {
-            Ok(v) => Self::Found(v),
-            Err(e) => Self::Blind {
-                because: format!("the result could not be serialized: {e}"),
-            },
-        }
-    }
+/// The wire answer: an [`Outcome`] whose payload is already JSON.
+pub type Answer = Outcome<Value>;
 
-    /// A pre-built JSON payload.
-    #[must_use]
-    pub fn found_value(payload: Value) -> Self {
-        Self::Found(payload)
-    }
-
+impl<P> Outcome<P> {
     /// Nothing was found, and that is the answer.
     #[must_use]
     pub fn empty(of: impl Into<String>) -> Self {
@@ -168,7 +232,10 @@ impl Answer {
 
     /// The question was not understood, and here is what would be.
     #[must_use]
-    pub fn refused(because: impl Into<String>, legal: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn refused(
+        because: impl Into<String>,
+        legal: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self::Refused {
             because: because.into(),
             legal: legal.into_iter().map(Into::into).collect(),
@@ -196,17 +263,23 @@ impl Answer {
         }
     }
 
+    /// Which arm this is.
+    #[must_use]
+    pub const fn kind(&self) -> OutcomeKind {
+        match self {
+            Self::Found(_) => OutcomeKind::Found,
+            Self::Empty { .. } => OutcomeKind::Empty,
+            Self::Refused { .. } => OutcomeKind::Refused,
+            Self::Blind { .. } => OutcomeKind::Blind,
+        }
+    }
+
     /// The stable discriminant. Derived from the variant, never chosen at a
     /// call site — which is what makes two different answers unable to render
     /// the same way.
     #[must_use]
-    pub fn outcome(&self) -> &'static str {
-        match self {
-            Self::Found(_) => "found",
-            Self::Empty { .. } => "empty",
-            Self::Refused { .. } => "refused",
-            Self::Blind { .. } => "blind",
-        }
+    pub const fn outcome(&self) -> &'static str {
+        self.kind().as_str()
     }
 
     /// Whether this answer says anything about the subject at all.
@@ -215,8 +288,79 @@ impl Answer {
     /// about the *question*, not about the world. A caller aggregating answers
     /// must not count them as evidence.
     #[must_use]
-    pub fn is_about_the_world(&self) -> bool {
-        matches!(self, Self::Found(_) | Self::Empty { .. })
+    pub const fn is_about_the_world(&self) -> bool {
+        self.kind().is_about_the_world()
+    }
+
+    /// Map the found payload, leaving the other three arms untouched.
+    pub fn map<Q>(self, f: impl FnOnce(P) -> Q) -> Outcome<Q> {
+        match self {
+            Self::Found(p) => Outcome::Found(f(p)),
+            Self::Empty { of } => Outcome::Empty { of },
+            Self::Refused { because, legal } => Outcome::Refused { because, legal },
+            Self::Blind { because } => Outcome::Blind { because },
+        }
+    }
+}
+
+impl Answer {
+    /// Something was found. The payload is serialized as-is.
+    ///
+    /// # Errors
+    ///
+    /// Never — a payload that cannot be serialized becomes a [`Self::Blind`]
+    /// naming the serialization failure, because a tool that found something
+    /// and cannot say so has not answered.
+    #[must_use]
+    pub fn found<T: Serialize + ?Sized>(payload: &T) -> Self {
+        match serde_json::to_value(payload) {
+            Ok(v) => Self::Found(v),
+            Err(e) => Self::Blind {
+                because: unserializable(&e),
+            },
+        }
+    }
+
+    /// A pre-built JSON payload.
+    #[must_use]
+    pub fn found_value(payload: Value) -> Self {
+        Self::Found(payload)
+    }
+}
+
+fn unserializable(e: &serde_json::Error) -> String {
+    format!("the result could not be serialized: {e}")
+}
+
+impl<P: Serialize> Outcome<P> {
+    /// The wire answer for this outcome, serializing the found payload.
+    ///
+    /// A payload that cannot be serialized becomes [`Outcome::Blind`], exactly
+    /// as [`Answer::found`] does.
+    #[must_use]
+    pub fn to_answer(&self) -> Answer {
+        match self {
+            Self::Found(p) => Answer::found(p),
+            Self::Empty { of } => Outcome::Empty { of: of.clone() },
+            Self::Refused { because, legal } => Outcome::Refused {
+                because: because.clone(),
+                legal: legal.clone(),
+            },
+            Self::Blind { because } => Outcome::Blind {
+                because: because.clone(),
+            },
+        }
+    }
+
+    /// The wire answer for this outcome, consuming it.
+    #[must_use]
+    pub fn into_answer(self) -> Answer {
+        match self {
+            Self::Found(p) => Answer::found(&p),
+            Self::Empty { of } => Outcome::Empty { of },
+            Self::Refused { because, legal } => Outcome::Refused { because, legal },
+            Self::Blind { because } => Outcome::Blind { because },
+        }
     }
 
     /// Render to the JSON string an MCP tool returns.
@@ -227,10 +371,6 @@ impl Answer {
     pub fn render(&self) -> String {
         let value = self.to_value();
         serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
-            // Unreachable in practice: `to_value` already produced a `Value`,
-            // and every `Value` serializes. Kept because "unreachable" and
-            // "panics in production" are one refactor apart, and this is the
-            // one function that must never fail to say something.
             let mut fallback = Map::new();
             fallback.insert("outcome".into(), Value::String("blind".into()));
             fallback.insert(
@@ -245,29 +385,10 @@ impl Answer {
     #[must_use]
     pub fn to_value(&self) -> Value {
         match self {
-            Self::Found(payload) => {
-                // The payload is spliced when it is an object, so a tool's own
-                // keys stay at the top level and existing consumers of a
-                // hand-rolled server keep reading the same shape. A non-object
-                // payload (an array, a scalar) is nested under `result`,
-                // because an array cannot carry a discriminant.
-                match payload {
-                    Value::Object(fields) => {
-                        let mut out = Map::new();
-                        out.insert("outcome".into(), Value::String("found".into()));
-                        for (k, v) in fields {
-                            // A payload key named `outcome` would overwrite the
-                            // discriminant and make a `found` answer able to
-                            // claim it was `blind`. The payload loses.
-                            if k != "outcome" {
-                                out.insert(k.clone(), v.clone());
-                            }
-                        }
-                        Value::Object(out)
-                    }
-                    other => json!({ "outcome": "found", "result": other }),
-                }
-            }
+            Self::Found(p) => match serde_json::to_value(p) {
+                Ok(payload) => found_wire(payload),
+                Err(e) => blind_wire(&unserializable(&e)),
+            },
             Self::Empty { of } => json!({
                 "outcome": "empty",
                 "of": of,
@@ -294,27 +415,47 @@ impl Answer {
                 );
                 Value::Object(out)
             }
-            Self::Blind { because } => json!({
-                "outcome": "blind",
-                "because": because,
-                "note": "The tool could NOT look. This is not an absence and not \
-                         a denial — conclude nothing about the subject.",
-            }),
+            Self::Blind { because } => blind_wire(because),
         }
     }
 }
 
-impl std::fmt::Display for Answer {
-    /// The wire form, so an `Answer` can be returned where a `String` is
+/// The `found` wire shape: an object payload keeps its keys at the top level,
+/// minus any `outcome` key, which would forge the discriminant. A non-object
+/// payload is nested under `result`, because an array cannot carry a
+/// discriminant.
+fn found_wire(payload: Value) -> Value {
+    match payload {
+        Value::Object(fields) => {
+            let mut out = Map::new();
+            out.insert("outcome".into(), Value::String("found".into()));
+            out.extend(fields.into_iter().filter(|(k, _)| k != "outcome"));
+            Value::Object(out)
+        }
+        other => json!({ "outcome": "found", "result": other }),
+    }
+}
+
+fn blind_wire(because: &str) -> Value {
+    json!({
+        "outcome": "blind",
+        "because": because,
+        "note": "The tool could NOT look. This is not an absence and not \
+                 a denial — conclude nothing about the subject.",
+    })
+}
+
+impl<P: Serialize> std::fmt::Display for Outcome<P> {
+    /// The wire form, so an answer can be returned where a `String` is
     /// expected without a visible conversion at every call site.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.render())
     }
 }
 
-impl From<Answer> for String {
-    fn from(a: Answer) -> Self {
-        a.render()
+impl<P: Serialize> From<Outcome<P>> for String {
+    fn from(o: Outcome<P>) -> Self {
+        o.render()
     }
 }
 
@@ -390,7 +531,12 @@ mod tests {
         assert_ne!(empty["outcome"], blind["outcome"]);
         // And each says in words what it means, for a reader that does not
         // know the vocabulary yet.
-        assert!(empty["note"].as_str().unwrap().contains("nothing was found"));
+        assert!(
+            empty["note"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was found")
+        );
         assert!(blind["note"].as_str().unwrap().contains("not an absence"));
     }
 
@@ -469,8 +615,7 @@ mod tests {
     #[test]
     fn an_unserializable_payload_becomes_blind() {
         // A map with non-string keys is the canonical serde_json failure.
-        let bad: std::collections::HashMap<[u8; 2], i32> =
-            [([1, 2], 3)].into_iter().collect();
+        let bad: std::collections::HashMap<[u8; 2], i32> = [([1, 2], 3)].into_iter().collect();
         let a = Answer::found(&bad);
         assert_eq!(a.outcome(), "blind");
         let parsed: Value = serde_json::from_str(&a.render()).expect("valid JSON");
@@ -521,5 +666,97 @@ mod tests {
         let a = Answer::empty("pods");
         assert_eq!(a.to_string(), a.render());
         assert_eq!(String::from(a.clone()), a.render());
+    }
+
+    /// The all-variants row: one sample per arm, its wire string and whether
+    /// it is about the world. The match has no wildcard, so a new arm does not
+    /// compile until it has a row here.
+    fn row(kind: OutcomeKind) -> (Outcome<Vec<u32>>, &'static str, bool) {
+        match kind {
+            OutcomeKind::Found => (Outcome::Found(vec![7]), "found", true),
+            OutcomeKind::Empty => (Outcome::empty("pods"), "empty", true),
+            OutcomeKind::Refused => (Outcome::refused("bad kind", ["pod"]), "refused", false),
+            OutcomeKind::Blind => (Outcome::blind("vpn down"), "blind", false),
+        }
+    }
+
+    #[test]
+    fn every_arm_has_a_row_and_every_row_agrees_with_every_surface() {
+        assert_eq!(OutcomeKind::ALL.len(), 4, "a new arm needs a row in `row`");
+        for &kind in OutcomeKind::ALL {
+            let (typed, wire, world) = row(kind);
+            assert_eq!(typed.kind(), kind);
+            assert_eq!(kind.as_str(), wire);
+            assert_eq!(kind.to_string(), wire);
+            assert_eq!(typed.outcome(), wire);
+            assert_eq!(kind.is_about_the_world(), world);
+            assert_eq!(typed.is_about_the_world(), world);
+
+            let parsed: Value = serde_json::from_str(&typed.render()).expect("valid JSON");
+            assert_eq!(parsed["outcome"], wire, "{kind:?}: rendered discriminant");
+
+            let answer = typed.to_answer();
+            assert_eq!(answer.kind(), kind);
+            assert_eq!(answer.render(), typed.render(), "{kind:?}: typed vs wire");
+            assert_eq!(typed.clone().into_answer(), answer);
+            assert_eq!(String::from(typed.clone()), typed.render());
+            assert_eq!(typed.map(|v| v.len()).kind(), kind);
+        }
+    }
+
+    #[test]
+    fn all_lists_each_arm_once_with_distinct_wire_strings() {
+        let mut seen = std::collections::HashSet::new();
+        for &kind in OutcomeKind::ALL {
+            assert!(
+                seen.insert(kind.as_str()),
+                "{kind:?} repeats a discriminant"
+            );
+        }
+        assert_eq!(seen.len(), OutcomeKind::ALL.len());
+    }
+
+    #[test]
+    fn map_touches_only_the_found_payload() {
+        assert_eq!(Outcome::Found(2).map(|n| n * 10), Outcome::Found(20));
+        assert_eq!(
+            Outcome::<u8>::empty("x").map(u32::from),
+            Outcome::<u32>::empty("x")
+        );
+        assert_eq!(
+            Outcome::<u8>::refused("r", ["a"]).map(u32::from),
+            Outcome::<u32>::refused("r", ["a"])
+        );
+        assert_eq!(
+            Outcome::<u8>::blind("b").map(u32::from),
+            Outcome::<u32>::blind("b")
+        );
+    }
+
+    #[test]
+    fn a_typed_unserializable_payload_renders_blind() {
+        let bad: std::collections::HashMap<[u8; 2], i32> = [([1, 2], 3)].into_iter().collect();
+        let typed = Outcome::Found(bad);
+        assert_eq!(typed.kind(), OutcomeKind::Found);
+        let parsed: Value = serde_json::from_str(&typed.render()).expect("valid JSON");
+        assert_eq!(parsed["outcome"], "blind");
+        assert_eq!(typed.to_answer().kind(), OutcomeKind::Blind);
+        assert_eq!(typed.into_answer().kind(), OutcomeKind::Blind);
+    }
+
+    #[test]
+    fn a_typed_object_payload_cannot_forge_the_discriminant() {
+        #[derive(Serialize)]
+        struct Forged {
+            outcome: &'static str,
+            rows: u8,
+        }
+        let v = Outcome::Found(Forged {
+            outcome: "blind",
+            rows: 1,
+        })
+        .to_value();
+        assert_eq!(v["outcome"], "found");
+        assert_eq!(v["rows"], 1);
     }
 }

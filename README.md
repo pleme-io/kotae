@@ -16,6 +16,34 @@ Answer::blind("the credential expired")                // I could not look
 Each renders JSON carrying an explicit `outcome` discriminant, and **no two of
 them can produce the same bytes**.
 
+## The typed form
+
+`Answer` is `Outcome<serde_json::Value>`. A library returns `Outcome<P>` with
+its own payload type and renders through the same code at the border:
+
+```rust
+use kotae::{Outcome, OutcomeKind};
+
+let o: Outcome<Vec<Pod>> = Outcome::Found(pods);
+assert_eq!(o.kind(), OutcomeKind::Found);
+let wire = o.into_answer();
+```
+
+`OutcomeKind::ALL` lists the four arms. The enum and the list come from one
+table, so a fifth arm cannot exist unlisted.
+
+## A named authority
+
+`Authority` is a trimmed, non-empty name of who authorized a mutation. The only
+constructor is `Authority::parse(Option<&str>)`; a missing or blank value is a
+`refused` answer that names the legal form. It has no `Deserialize`: keep the
+wire field an `Option<String>` and parse it at the boundary, so one bad entry
+is refused alone.
+
+```rust
+let who = kotae::Authority::parse(args.authorized_by.as_deref())?;
+```
+
 ## Why this exists
 
 The reader of a tool's answer is a language model with no peripheral vision. It
