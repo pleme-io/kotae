@@ -1,6 +1,6 @@
 [package]
 name = "kotae"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.89.0"
 description = "Kotae (答え) — the typed answer a machine gives a machine. One closed sum over the four distinguishable outcomes of a tool call (found / empty / refused / blind), rendered so that no two of them can ever produce the same bytes. Built because a reader with no peripheral vision cannot tell an empty result from a failed look unless the bytes say so."
